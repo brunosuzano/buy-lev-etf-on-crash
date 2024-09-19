@@ -20,43 +20,87 @@ relative_path = os.path.join(os.getcwd(), 'buy-lev-etf-on-crash')
 returns = pd.read_csv(os.path.join(relative_path, 'crsp_a_indexes.csv'))
 
 # =============================================================================
-# Prepare market (ETF) returns data
+# Prepare data
 # =============================================================================
-
-### Data preparation
 
 # Convert the date column to datetime
 returns = returns.rename(columns={'caldt': 'date'})
 returns['date'] = pd.to_datetime(returns['date'], format='%Y-%m-%d')
 
-# =============================================================================
-
-### Calculate ETF fee
-
-# Extract the year from the 'date' column and count the number of days for each year
-days_per_year = returns.groupby(returns['date'].dt.year).size()
-
-# Calculate average number of days per year from 1926 to 1944 (inclusive)
-avg_days_1926_1944 = round(days_per_year.loc[1926:1944].mean())
-
-# Calculate average number of days per year from 1945 to 1952 (inclusive)
-avg_days_1945_1952 = round(days_per_year.loc[1945:1952].mean())
-
-# Calculate average number of days per year after 1952
-avg_days_after_1952 = round(days_per_year.loc[1953:].mean())
-
-# =============================================================================
-
-### More data preparation
-
 # Set the 'date' column as the index
 returns = returns.set_index('date')
 
-# Set the first row of all columns in spy to 0
-returns.iloc[0] = 0
-
 # Replace NaN values in the 'RET' column with 0
 returns = returns.fillna(0)
+
+# =============================================================================
+# Implement the daily ETF fee
+# =============================================================================
+
+# Define the annual ETF fee
+etf_fee_annual = 0.003
+
+# Group by year and calculate the number of days per year
+days_per_year = returns.groupby(returns.index.year).size()
+
+# Calculate means and standard deviations for each period
+# 1. From 1926 to 1944 (inclusive)
+mean_1926_to_1944 = days_per_year.loc[1926:1944].mean()
+std_1926_to_1944 = days_per_year.loc[1926:1944].std()
+
+# 2. From 1945 to 1952 (inclusive)
+mean_1945_to_1952 = days_per_year.loc[1945:1952].mean()
+std_1945_to_1952 = days_per_year.loc[1945:1952].std()
+
+# 3. From 1953 onwards
+mean_1953_onwards = days_per_year.loc[1953:].mean() # Should be 252
+std_1953_onwards = days_per_year.loc[1953:].std()
+
+# Define a function to adjust the days based on whether they are within 2 standard deviations
+def adjust_days(year, days):
+    if year <= 1944:
+        mean, std = mean_1926_to_1944, std_1926_to_1944
+    elif 1945 <= year <= 1952:
+        mean, std = mean_1945_to_1952, std_1945_to_1952
+    else:
+        mean, std = 252, std_1953_onwards
+    
+    # Check if the value is within 2 standard deviations
+    if abs(days - mean) > 2 * std:
+        return round(mean)  # Assign the (rounded) mean if it's outside 2 standard deviations
+    else:
+        return days  # Keep the original value if within the range
+
+# Apply the function to adjust the number of days per year
+adjusted_days_per_year = pd.Series({
+    year: adjust_days(year, days) for year, days in days_per_year.items()
+})
+
+# Calculate daily ETF fee
+etf_fee_daily = (1+etf_fee_annual)**(1/adjusted_days_per_year)-1
+
+# Adjust market returns for the daily ETF fee
+adjusted_returns = returns['vwretd'].copy()
+
+# Extract the year from the date index in adjusted_returns
+years = adjusted_returns.index.year
+
+# Map the corresponding ETF fee for each year to the returns
+daily_fee_for_returns = years.map(etf_fee_daily)
+
+# Subtract the corresponding daily ETF fee from each daily return
+adjusted_returns = adjusted_returns - daily_fee_for_returns.values
+
+# Set the first return to 0
+adjusted_returns.iloc[0] = 0
+
+# Add the adjusted_returns series as a new column in the returns DataFrame
+returns['vwretd_adj'] = adjusted_returns
+
+# Delete uneccessary variables to remove clutter
+del adjusted_days_per_year, daily_fee_for_returns, days_per_year, etf_fee_annual
+del etf_fee_daily, mean_1926_to_1944, mean_1945_to_1952, mean_1953_onwards
+del std_1926_to_1944, std_1945_to_1952, std_1953_onwards, years
 
 # =============================================================================
 # Calculate prices
@@ -103,10 +147,6 @@ drawdowns = (running_max - prices) / running_max
 x_threshold = 0.20
 y_threshold = 0.02
 
-# Define the ETF fee
-etf_fee_annual = 0.003
-etf_fee_daily = (1+etf_fee_annual)**(1/252)-1
-
 # Define the transaction cost
 transaction_cost = 0.003
 
@@ -119,10 +159,6 @@ position = pd.Series(0, index=drawdowns.index)
 
 # Track when the strategy is in the market
 in_market = False
-
-# Create a series to track the strategy's returns
-adjusted_returns = returns['vwretd'].copy()
-adjusted_returns = adjusted_returns - etf_fee_daily
 
 # Iterate over the shifted drawdown series
 for i in range(1, len(shifted_drawdowns)):
